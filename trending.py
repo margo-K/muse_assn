@@ -1,5 +1,4 @@
 import nltk
-import bs4
 import json
 from datetime import datetime
 import pdb
@@ -9,7 +8,7 @@ import re
 
 def get_list_items(text):
 	p = re.compile('<li>(.*?)</li>')
-	list_items = p.findall(text)
+	return p.findall(text)
 
 def get_quarter(datetime):
 	year, month = datetime.year, datetime.month
@@ -33,8 +32,11 @@ def _tokenize_listing(listing,date_func,stopwords=nltk.corpus.stopwords.words('E
 	category = tuple(category)
 
 	description = listing['full_description']
-	qualities = bs4.BeautifulSoup(description).find_all("li")
-	text = ". ".join([quality.text for quality in qualities])
+	qualities = get_list_items(description)
+	if not qualities:
+		return set(),[],""#this is in the case where there's no data to index
+
+	text = ". ".join([quality for quality in qualities])
 	tokens = [unigram.lower().strip(string.punctuation) for unigram in nltk.word_tokenize(text) if unigram not in stopwords and unigram != ""]#[item.lower().strip(string.punctuation) for item in text.split(' ') if item not in nltk.corpus.stopwords.words('English')+list(string.punctuation)]
 	if '' in tokens:
 		tokens.remove('')
@@ -47,26 +49,28 @@ def get_lexicon(listings,date_func):
 	groups = {}
 	for listing in listings:
 		tokens, category, date = _tokenize_listing(listing,date_func)
-		lexicon.union(tokens)
+		if not tokens:
+			break
+		lexicon |=tokens
 		group_listings = groups.setdefault((category,date),[])
 		group_listings.append((tokens))
 	print "Grouped all listings"
 	print len(groups)
 	total_words = len(lexicon)
 	lexicon_indexes = {word: index for index, word in enumerate(lexicon)}
+	size = len(lexicon_indexes)
 	for group_name, listings_tokens in groups.iteritems():
-		groups[group_name] = [_get_vectorized_listing(tk) for tk in listings_tokens]
+		groups[group_name] = [_get_vectorized_listing(tk,lexicon_indexes,size) for tk in listings_tokens]
 	return lexicon_indexes, groups #could be the OO values
 
-
-def _get_vectorized_listing(listing_tokens,lexicon_indexes):
-	print len(lexicon_indexes)
-	v_listing = np.zeros(len(lexicon_indexes))
+def _get_vectorized_listing(listing_tokens,lexicon_indexes,size):
+	v_listing = np.zeros(size)
 	for token in listing_tokens:
-		pdb.set_trace()
-		v_listing[lexicon_indexes[token]]+=1
+		index = lexicon_indexes[token]
+		v_listing[index]+=1
+	if size !=len(lexicon_indexes):
+		pdb.set_trace
 	return v_listing
-
 
 def get_probabilities(group):
 	"""Given a matrix of document-word vectors for a time period,
@@ -87,9 +91,7 @@ def get_probabilities(group):
 
 	return np.mean(group,axis=0)
 
-
 if __name__ == '__main__':
 	with open('data/listings.json','r') as f:
 		listings = json.load(f)
 		lexicon_indexes, groups = get_lexicon(listings,date_func=lambda x: x.year)
-	pdb.set_trace()
