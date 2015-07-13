@@ -1,6 +1,5 @@
 import requests
 import json
-import pdb
 
 def fetch_listings():
 	first = requests.get('http://themuse.com/api/v1/jobs',params={'page':0})
@@ -15,9 +14,8 @@ def fetch_listings():
 			print "Got results from page {}".format(page)
 			listings.extend(json.loads(r.text)['results'])
 		except Exception as e:
-			print e
-			raise
-	with open('listings.json', 'w') as f:
+			print "Page {} was not retrieved".format(page)
+	with open('data/listings.json', 'w') as f:
 		json.dump(listings,f)
 	return listings
 
