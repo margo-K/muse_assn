@@ -1,44 +1,25 @@
 from __future__ import division
-import nltk
-import json
-import pdb
-import string
-import numpy as np
-import itertools
+import os
 import sys
 import datetime
+import json
+import numpy as np
 
 from fetcher import fetch_listings
-from helpers import get_list_items, get_date, trunc_date
+from helpers import get_date, trunc_date
+from trending_metrics import biggest_change
+from parsers import existence_parse
 
-def _parse_listing(listing,bigrams=True,trigrams=False,stopwords=None):
-	"""Returns a set of tokens in the listing, along with the listing's category and date"""
-	if not stopwords:
-		stopwords = nltk.corpus.stopwords.words('English') + list(string.punctuation)
-	category = listing['categories']#Note: takes each category as a list.	
-	description = listing['full_description']
-	qualities = get_list_items(description)
-	if not qualities or not category:
-		return set(),[],"" 
-
-	text = ". ".join([quality for quality in qualities])
-	tokens = [token.lower().strip(string.punctuation) for token in text.split(' ') if token not in stopwords] 
-	all_tokens = set(tokens)
-	all_tokens.discard('')
-	if bigrams:
-		all_tokens |= set(nltk.bigrams(tokens))
-	if trigrams:
-		all_tokens |= set(nltk.trigrams(tokens))
-	return all_tokens, category , listing['creation_date']
-
-def get_lexicon(listings):
+def get_lexicon(listings,parse_fn=existence_parse):
+	"""Returns a lexicon of the entire set of listings and a list of parsed
+	listing records"""
 	word_counter, un_indexed = 0, 0
 	lexicon_index = {}
 	lexicon, parsed_listings = [], []
 	
 	print "Building lexicon ..."
 	for listing in listings:
-		tokens, categories, date = _parse_listing(listing)
+		tokens, categories, date = parse_fn(listing)
 		if tokens:
 			int_tokens = []
 			for token in tokens:
@@ -56,15 +37,26 @@ def get_lexicon(listings):
 	print "Portion not indexed: {}".format(un_indexed/len(listings))
 	return lexicon, parsed_listings
 
-def _group_listings(parsed_listings,lexicon_size,time_period):
+def group_listings(parsed_listings,lexicon_size,time_period):
+	"""Returns a nested dictionary of grouped, vectorized listings, where the 
+	groups are categories then time periods
+
+	Ex: 
+	lexicon = ["big","dog","barks","loudly]
+	parsed_listings = [([1,2],'business','2012-01-12'), ([1,3],'business',2013-03-01'),
+						([0,1,2],'marketing','2014-04-01'),([0,2],'marketing','2013-01-01')]
+	group_listings(parsed_listings,lexicon_size=4,time_period='year')
+
+	=> {"business": {datetime.date(2012, 1, 1): [[0,1,1,0]],datetime.date(2013, 1, 1): [[0,1,0,1]]}, 
+		"marketing":{datetime.date(2013, 1, 1):[[0,0,1,0]] , datetime.date(2014, 1, 1): [[1,1,1,0]]}}"""
 	groups = {}
 	for (int_tokens, categories, date) in parsed_listings:
 		date_period = trunc_date(get_date(date),time_period)
 		vector_listing = _get_vectorized_listing(int_tokens,lexicon_size)
 		for category in categories:
 			group_listings = groups.setdefault(category,{})
-			category_date_listings = groups[category].setdefault(date,[])
-			groups[category][date].append(vector_listing)
+			category_date_listings = groups[category].setdefault(date_period,[])
+			groups[category][date_period].append(vector_listing)
 	return groups
 
 def _get_vectorized_listing(int_tokens,lexicon_size):
@@ -95,29 +87,8 @@ def _get_probabilities(listings_group):
 
 	return np.mean(listings_group,axis=0)
 
-def biggest_change(sorted_group_probabilities,limit):
-	"""Takes in an ordered list, group_probabilities, calculates the average of the last n-1 periods
-	and returns the indices of the n top words (n <= limit) with the 
-	largest positive difference between the last period and the previous average
 
-	Ex: lexicon = ["big", "dog", "jumps" "high"]
-		group_probabilities = [array([0, 1, 1, 1]),
- 		array([ 0.5,  1. ,  1. ,  1. ]),
- 		array([ 1. ,  0.5,  0.5,  0.5])]
- 		=> [0]
- """
- 	#Add case when there's only one, in case it's sparse
- 	if sorted_group_probabilities[:-1]:
- 		old_average = np.mean(sorted_group_probabilities[:-1],axis=0)
- 	else:
- 		old_average = np.zeros(len(sorted_group_probabilities[-1]))
- 	deltas = sorted_group_probabilities[-1]-old_average
- 	sorted_indices = np.argsort(deltas)
- 	trending = itertools.takewhile(lambda x: deltas[x]>0,sorted_indices[::-1])
-	top_trending = itertools.islice(trending,0,limit)
-	return top_trending
-
-def get_trending(category_listings,trending_function=biggest_change,limit=10):
+def get_trending(category_listings,current_period,time_period,trending_function=biggest_change,limit=10):
 	"""Takes the data for a category and outputs a generator of the indices
 	of trending items,where trending is defined by the trending_function
 
@@ -125,23 +96,28 @@ def get_trending(category_listings,trending_function=biggest_change,limit=10):
 		 datetime.date(2013, 1, 1): [[1,1,0,0], [1,0,1,1]]} => P(2013) = [1,.5,.5,.5]
 
 		 =>  generator([0]), b/c the first element is the only one with a positive change """
-	
-	group_probabilities = [_get_probabilities(category_listings[time_period]) for time_period in sorted(category_listings.keys())]
-	return trending_function(group_probabilities,limit)
 
-def main(data_file='data/listings.json',time_period='year'):
-	if data_file:
-		with open(data_file,'r') as f:
-			listings = json.load(f)
-	else:
-		listings = fetch_listings()
+	if current_period not in category_listings.keys():
+		print "No listings for this period"
+		return []
 
+	current_period_probabilities = _get_probabilities(category_listings[current_period])
+	periods = category_listings.keys()
+	periods.remove(current_period)
+
+	past_period_probabilities = [_get_probabilities(category_listings[period]) for period in periods]
+	return trending_function(current_period_probabilities,past_period_probabilities,limit)
+
+def main(listings,time_period):
 	lexicon, parsed_listings = get_lexicon(listings)
-	groups = _group_listings(parsed_listings,len(lexicon),time_period)
-	print "Trending Items {} to {}".format(time_period,time_period)
+	groups = group_listings(parsed_listings,len(lexicon),time_period)
+	print "\nTrending Items: {}".format(time_period)
+	current_period = trunc_date(datetime.datetime.now().date(),time_period)
+	print "Current Period: {}".format(current_period)
+
 	for category, category_listings in groups.iteritems():
-		trending = get_trending(category_listings)
 		print "\n{}\n===========".format(category)
+		trending = get_trending(category_listings,current_period,time_period)
 		for rank, index in enumerate(trending):
 			word_or_phrase = lexicon[index]
 			if type(word_or_phrase) == tuple:
@@ -149,7 +125,18 @@ def main(data_file='data/listings.json',time_period='year'):
 			print "{}. {}".format(rank+1,word_or_phrase.encode('utf-8'))
 
 if __name__ == '__main__':
-	main()
+	if len(sys.argv) !=2:
+		time_period = 'year'
+	else: 
+		time_period = sys.argv[1]
+
+	if os.path.isfile('data/listings.json'):
+		with open('data/listings.json','r') as f:
+			listings = json.load(f)
+	else:
+		listings = fetch_listings()
+
+	main(listings,time_period)
 
 
 
