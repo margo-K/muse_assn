@@ -3,12 +3,8 @@ import json
 import pdb
 
 def fetch_listings():
-	try:
-		first = requests.get('http://themuse.com/api/v1/jobs',params={'page':0})
-		print "Got the first page"
-	except:
-		print "Could not get the first file"
-		return []
+	first = requests.get('http://themuse.com/api/v1/jobs',params={'page':0})
+	print "Got the first page"
 	results = json.loads(first.text)
 	max_page = results['page_count']
 	listings = results['results']
